@@ -70,7 +70,7 @@ class ItemReserva(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["reserva", "livro"], name="livro_unico_por_reserva"),
+            models.UniqueConstraint(fields=["reserva", "livro"], name="livro_unico_por_reserva"), #Dentro de uma mesma reserva, um determinado livro só pode aparecer uma vez.
         ]
 ```
 

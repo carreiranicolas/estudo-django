@@ -70,10 +70,7 @@ INSTALLED_APPS = [
 
 ## 3.3 A forma mais simples: `@api_view`
 
-O DRF fornece uma versão "turbinada" de `HttpRequest`/`HttpResponse`, junto com o decorador
-`@api_view`, que já cuida de negociação de conteúdo (JSON por padrão) e gera aquela
-interface navegável no navegador (*browsable API*) — muito útil para testar endpoints
-manualmente durante o desenvolvimento.
+O DRF fornece uma versão "turbinada" de `HttpRequest`/`HttpResponse`, junto com o decorador`@api_view`, que já cuida de negociação de conteúdo (JSON por padrão) e gera aquela interface navegável no navegador (*browsable API*) — muito útil para testar endpoints manualmente durante o desenvolvimento.
 
 ```python
 # catalogo/views.py
@@ -88,7 +85,7 @@ from .serializers import LivroSerializer
 def lista_livros(request):
     if request.method == "GET":
         livros = Livro.objects.select_related("autor").all()
-        serializer = LivroSerializer(livros, many=True)
+        serializer = LivroSerializer(livros, many=True) # Usamos many=true pra dizer pro Serializer que são varios elementos
         return Response(serializer.data)
 
     serializer = LivroSerializer(data=request.data)
@@ -131,6 +128,16 @@ Note os **códigos de status** usados de propósito: `201 Created` ao criar,
 "frescura" — é o que permite que qualquer cliente HTTP genérico (não só o seu front-end)
 entenda o resultado da operação sem precisar interpretar o corpo da resposta.
 
+OBS: Pode ser que campos decimais retornem como str na resposta. Para corrigir, basta ir nas settings.py e digitar:
+
+```python
+
+REST_FRAMEWORK = {
+    'COERCE_DECIMAL_TO_STR': False
+}
+
+```
+
 ## 3.4 Serializers: a ponte entre modelo e JSON
 
 Um `Serializer` faz dois trabalhos opostos:
@@ -153,6 +160,9 @@ class LivroSerializer(serializers.Serializer):
     titulo = serializers.CharField(max_length=255)
     isbn = serializers.CharField(max_length=13)
     preco = serializers.DecimalField(max_digits=8, decimal_places=2)
+
+    #OBS: Caso o nome do campo do Serializer não seja o mesmo do model, especificamos o
+    #argumento source= noo Serializer
 ```
 
 ### `ModelSerializer`: o caminho recomendado no dia a dia
@@ -176,8 +186,10 @@ Campos que não existem no modelo (calculados) são declarados à parte e refere
 `Meta.fields`:
 
 ```python
+from decimal import Decimal # precisamos, pois não é possível multiplicar o tipo Decimal com float
+
 class LivroSerializer(serializers.ModelSerializer):
-    preco_com_desconto = serializers.SerializerMethodField()
+    preco_com_desconto = serializers.SerializerMethodField(method_name='get_preco_com_desconto')
 
     class Meta:
         model = Livro
@@ -187,7 +199,94 @@ class LivroSerializer(serializers.ModelSerializer):
         return round(livro.preco * Decimal("0.9"), 2)
 ```
 
+## 3.7 Representando relacionamentos em serializers
+
+Esse é um dos pontos de maior impacto no design de uma API: como representar
+`livro.autor` na saída JSON? O DRF oferece quatro estratégias:
+
+**1) Chave primária** (mais compacto, exige uma chamada extra do cliente para ver detalhes):
+
+```python
+autor = serializers.PrimaryKeyRelatedField(queryset=Autor.objects.all())
+```
+
+```json
+{"id": 1, "titulo": "Duna", "autor": 3}
+```
+
+**2) String** (usa o `__str__` do modelo relacionado — só leitura):
+
+```python
+autor = serializers.StringRelatedField() # Uma observação é que se o nome do campo no model for diferente de autor, usaríamos o source=
+```
+
+
+```json
+{"id": 1, "titulo": "Duna", "autor": "Frank Herbert"}
+```
+
+Um detalhe é que pra isso funcionar, sem gerar o problema de N + 1 queries, precisamos ter na view o select_related
+
+**3) Objeto aninhado** (mais completo, mais "pesado"):
+
+```python
+class AutorResumidoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Autor
+        fields = ["id", "nome"]
+
+
+class LivroSerializer(serializers.ModelSerializer):
+    autor = AutorResumidoSerializer(read_only=True)
+
+    class Meta:
+        model = Livro
+        fields = ["id", "titulo", "autor"]
+```
+
+```json
+{"id": 1, "titulo": "Duna", "autor": {"id": 3, "nome": "Frank Herbert"}}
+```
+
+**4) Hyperlink** (o cliente segue links, no espírito mais "puro" de REST — exige que a
+view correspondente tenha `name=` registrado no roteador):
+
+```python
+autor = serializers.HyperlinkedRelatedField(
+    queryset=Autor.objects.all(), view_name="autor-detail"
+)
+```
+
+```json
+{"id": 1, "titulo": "Duna", "autor": "http://api.exemplo.com/autores/3/"}
+```
+
+> Para relacionamentos N:N, o mesmo raciocínio vale usando `many=True` no serializer
+> aninhado:
+> ```python
+> categorias = CategoriaSerializer(many=True, read_only=True)
+> ```
+
+
 ## 3.5 Validação de dados
+
+A validação de dados pode ser feita em nossa VIEW da seguinte forma:
+
+```python
+@api_view(["GET", "POST"])
+def lista_livros(request):
+    if request.method == "GET":
+        livros = Livro.objects.select_related("autor").all()
+        serializer = LivroSerializer(livros, many=True) 
+        return Response(serializer.data)
+
+    serializer = LivroSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True) #Ele verá se os dados são válidos. Se não for, irá subir um erro 400 badrequest. É o raise_exception=True que faz ele fazer isso
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+```
+
+Uma obersvação é que: O is_valid() executa todas as validações disponíveis no Serializer, incluindo as validações automáticas do ModelSerializer e as validações personalizadas que definimos. Dessa forma, podemos definir alguns métodos (regras) especificas no nosso Serializer que seria incluída na validação do .is_valid()
 
 **Nível de campo** (usa a convenção `validate_<nome_do_campo>`):
 
@@ -235,73 +334,26 @@ class LivroSerializer(serializers.ModelSerializer):
         return Livro.objects.create(**dados_validados)
 ```
 
+No update:
+
+```python
+class LivroSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Livro
+        fields = ["id", "titulo", "isbn", "quantidade_total", "quantidade_disponivel"]
+
+    def update(self, instancia, dados_validados):
+        # ao cadastrar, a quantidade disponível começa igual à quantidade total
+        dados_validados["quantidade_disponivel"] = dados_validados["quantidade_total"]
+        return instance
+```
+
+
 O importante é sempre **retornar a instância** criada/atualizada ao final — é isso que o
 restante do framework (a view, a resposta) espera receber de volta.
 
-## 3.7 Representando relacionamentos em serializers
 
-Esse é um dos pontos de maior impacto no design de uma API: como representar
-`livro.autor` na saída JSON? O DRF oferece quatro estratégias:
-
-**1) Chave primária** (mais compacto, exige uma chamada extra do cliente para ver detalhes):
-
-```python
-autor = serializers.PrimaryKeyRelatedField(queryset=Autor.objects.all())
-```
-
-```json
-{"id": 1, "titulo": "Duna", "autor": 3}
-```
-
-**2) String** (usa o `__str__` do modelo relacionado — só leitura):
-
-```python
-autor = serializers.StringRelatedField()
-```
-
-```json
-{"id": 1, "titulo": "Duna", "autor": "Frank Herbert"}
-```
-
-**3) Objeto aninhado** (mais completo, mais "pesado"):
-
-```python
-class AutorResumidoSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Autor
-        fields = ["id", "nome"]
-
-
-class LivroSerializer(serializers.ModelSerializer):
-    autor = AutorResumidoSerializer(read_only=True)
-
-    class Meta:
-        model = Livro
-        fields = ["id", "titulo", "autor"]
-```
-
-```json
-{"id": 1, "titulo": "Duna", "autor": {"id": 3, "nome": "Frank Herbert"}}
-```
-
-**4) Hyperlink** (o cliente segue links, no espírito mais "puro" de REST — exige que a
-view correspondente tenha `name=` registrado no roteador):
-
-```python
-autor = serializers.HyperlinkedRelatedField(
-    queryset=Autor.objects.all(), view_name="autor-detail"
-)
-```
-
-```json
-{"id": 1, "titulo": "Duna", "autor": "http://api.exemplo.com/autores/3/"}
-```
-
-> Para relacionamentos N:N, o mesmo raciocínio vale usando `many=True` no serializer
-> aninhado:
-> ```python
-> categorias = CategoriaSerializer(many=True, read_only=True)
-> ```
+Além disso, podemos deletar objetos. Basta utilizar o .delete()
 
 ### Um princípio importante de design de API
 

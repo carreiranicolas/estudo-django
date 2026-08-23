@@ -55,6 +55,8 @@ Livro.objects.get(pk=1)                                # um único (lança exce�
 Livro.objects.filter(autor_id=3)                       # filtro simples
 Livro.objects.exclude(quantidade_disponivel=0)         # negação
 Livro.objects.filter(preco__gt=50).exclude(ano_publicacao__lt=2000)
+
+#OBS: a consulta com pk é sempre melhor, porque utiliza a primary_key independente de qual seja
 ```
 
 `get()` **sempre** espera exatamente um resultado — se não encontrar nada, lança
@@ -358,6 +360,39 @@ with connection.cursor() as cursor:
 
 ## 2.12 Django Admin: o painel gerado automaticamente
 
+Para criar o superuser do django admin:
+
+```bash
+
+python manage.py createsuperuser
+
+# Ai bastará colocar os dados que forem requeridos
+
+```
+
+Caso esqueça a senha:
+
+```bash
+
+python manage.py changepassword admin
+
+# Alterar para oq quiser
+
+```
+
+Uma vez acessado o painel, podemos editar o nome e o titulo do painel administrativo
+fazendo o seguinte:
+
+```python
+from django.contrib import admin
+
+admin.site.site_header = 'Nome do painel'
+
+admin.site.index_titule = 'Titulo do painel'
+
+
+```
+
 Registrar um modelo já dá um CRUD completo pronto:
 
 ```python
@@ -366,13 +401,13 @@ from django.contrib import admin
 from .models import Autor, Categoria, Livro
 
 
-@admin.register(Autor)
+@admin.register(Autor) # Registrando o Admin da classe Autor
 class AutorAdmin(admin.ModelAdmin):
-    list_display = ["nome", "data_nascimento"]
+    list_display = ["nome", "data_nascimento"] # Adiciona colunas no admin, na listagem
     search_fields = ["nome"]
 
 
-admin.site.register(Categoria)
+admin.site.register(Categoria) # Uma das formas
 ```
 
 ### Customizando a listagem
@@ -382,15 +417,51 @@ admin.site.register(Categoria)
 class LivroAdmin(admin.ModelAdmin):
     list_display = ["titulo", "autor", "preco", "status_estoque"]
     list_editable = ["preco"]              # editável direto na listagem
-    list_filter = ["categorias", "ano_publicacao"]
-    search_fields = ["titulo", "isbn"]
-    list_per_page = 20
-    list_select_related = ["autor"]        # evita N+1 na coluna 'autor'
-    autocomplete_fields = ["autor", "categorias"]
+    list_filter = ["categorias", "ano_publicacao"] # Cria um filtro lá no painel admin
+    search_fields = ["titulo", "isbn"] # Cria uma serach box para pesquisar objetos
+    list_per_page = 20 
+    list_select_related = ["autor"]        # evita N+1 na coluna 'autor'. Permite pegar
+    # objetos relacionados 
+   
 
-    @admin.display(ordering="quantidade_disponivel", description="Estoque")
+    @admin.display(ordering="quantidade_disponivel", description="Estoque") # Criando coluna calculada simples. Faleremos pra frente
     def status_estoque(self, livro):
         return "Baixo" if livro.quantidade_disponivel < 3 else "OK"
+```
+
+### Customizando os formularios
+
+No formulário onde cadastramos um objeto, podemos customizá-lo também
+
+```python
+@admin.register(Livro)
+class LivroAdmin(admin.ModelAdmin):
+    fields = ['livro'] # Seleciona somente esses campos pra aparecer no forms
+    exclude = ['isbn'] # Exclue campos do formulario
+    prepopulated_fields = {
+        'slug' : ['livro'] # O campo slug é criado a partir do campo livro
+    }
+
+    autocomplete_fields = ["categorias"] #Permite que no dropdown, nós pesquisemos
+```
+
+
+### Sobrescrevendo o queryset base (para colunas calculadas mais complexas)
+
+Podemos criar colunas calculadas para o painel administrativo que exigem um certo grau de complexidade:
+
+```python
+@admin.register(Autor)
+class AutorAdmin(admin.ModelAdmin):
+    list_display = ["nome", "total_livros"] # Adiciona a coluna no display
+
+    @admin.display(ordering="total_livros", description="Livros")
+    def total_livros(self, autor):
+        return autor.total_livros 
+    
+    def get_queryset(self, request): # É onde fazemos a lógica do calculo da coluna a ser adicionada no painel
+        return super().get_queryset(request).annotate(total_livros=Count("livros"))
+
 ```
 
 Pontos-chave:
@@ -405,23 +476,44 @@ Pontos-chave:
   uma busca com autocomplete — só funciona se o `ModelAdmin` do modelo relacionado (aqui,
   `Autor`) também definir `search_fields`.
 
-### Inlines: editando "filhos" dentro do "pai"
+### Lidando com links dentro do painel administrativo
 
 ```python
-class LivroInline(admin.TabularInline):
-    model = Livro
-    extra = 0
-    fields = ["titulo", "isbn"]
+from django.utils.html import format_html, url_encode
+from django.urls import reverse
 
+@admin.display(ordering='products_count')
+def products_count(self, collection):
+    url = (reverse('admin:app_model_changelist') + '?' + urlencode('collection__id': str(collection.id)))
+    return format_html('<a href="{}">{}</a>', url, collection.products_count)
+    
 
-@admin.register(Autor)
-class AutorAdmin(admin.ModelAdmin):
-    inlines = [LivroInline]
 ```
 
-`TabularInline` mostra os registros filhos em formato de tabela (compacto);
-`StackedInline` mostra cada um como um formulário separado (melhor quando há muitos
-campos). `extra = 0` remove as linhas em branco extras que o Django mostra por padrão.
+
+
+### Filtros customizados
+
+```python
+class EstoqueBaixoFilter(admin.SimpleListFilter):
+    title = "estoque"
+    parameter_name = "estoque"
+
+    def lookups(self, request, model_admin):
+        return [("baixo", "Baixo (< 3)")] # Especifica quais valores aparecerão no filtro
+
+    def queryset(self, request, queryset): # É onde a lógica do filtro é feita
+        if self.value() == "baixo":
+            return queryset.filter(quantidade_disponivel__lt=3)
+        return queryset
+
+
+Usando o filtro customizado que criamos no nosso painel administrativo de Livro
+
+@admin.register(Livro)
+class LivroAdmin(admin.ModelAdmin):
+    list_filter = [EstoqueBaixoFilter]
+```
 
 ### Ações customizadas
 
@@ -434,42 +526,6 @@ class LivroAdmin(admin.ModelAdmin):
     def zerar_estoque(self, request, queryset):
         atualizados = queryset.update(quantidade_disponivel=0)
         self.message_user(request, f"{atualizados} livro(s) atualizados.")
-```
-
-### Filtros customizados
-
-```python
-class EstoqueBaixoFilter(admin.SimpleListFilter):
-    title = "estoque"
-    parameter_name = "estoque"
-
-    def lookups(self, request, model_admin):
-        return [("baixo", "Baixo (< 3)")]
-
-    def queryset(self, request, queryset):
-        if self.value() == "baixo":
-            return queryset.filter(quantidade_disponivel__lt=3)
-        return queryset
-
-
-@admin.register(Livro)
-class LivroAdmin(admin.ModelAdmin):
-    list_filter = [EstoqueBaixoFilter]
-```
-
-### Sobrescrevendo o queryset base (para colunas calculadas mais complexas)
-
-```python
-@admin.register(Autor)
-class AutorAdmin(admin.ModelAdmin):
-    list_display = ["nome", "total_livros"]
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).annotate(total_livros=Count("livros"))
-
-    @admin.display(ordering="total_livros", description="Livros")
-    def total_livros(self, autor):
-        return autor.total_livros
 ```
 
 ### Validação de dados no admin
@@ -485,6 +541,24 @@ preco = models.DecimalField(
     validators=[MinValueValidator(0.01)],
 )
 ```
+
+### Inlines: editando "filhos" dentro do "pai"
+
+```python
+class LivroInline(admin.TabularInline):
+    model = Livro
+    extra = 0 # Linhas adicionadas no Inline
+    fields = ["titulo", "isbn"]
+
+
+@admin.register(Autor)
+class AutorAdmin(admin.ModelAdmin):
+    inlines = [LivroInline] #Vamos ter no painel de autor, alguns livros pra mexer
+```
+
+`TabularInline` mostra os registros filhos em formato de tabela (compacto);
+`StackedInline` mostra cada um como um formulário separado (melhor quando há muitos
+campos). `extra = 0` remove as linhas em branco extras que o Django mostra por padrão.
 
 ### Mantendo apps reutilizáveis também no admin
 

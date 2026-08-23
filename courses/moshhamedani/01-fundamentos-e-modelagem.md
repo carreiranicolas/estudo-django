@@ -384,7 +384,7 @@ class Livro(models.Model):
     )
 
     class Meta:
-        ordering = ["titulo"]
+        ordering = ["titulo"] # Serve para ordenar no painel administrativo
 
     def __str__(self):
         return self.titulo

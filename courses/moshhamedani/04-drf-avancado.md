@@ -60,7 +60,7 @@ URLs do Django — por baixo dos panos, sempre existe uma função no final da c
 
 Se você reparar, o corpo de `get()` em `ListaLivrosView` (montar queryset → serializar →
 responder) é **idêntico** para qualquer outro modelo — só muda o queryset e o serializer.
-O DRF já empacota esse padrão em **mixins**:
+O DRF já empacota esse padrão em **mixins** (mixins são classes que empacotam um padrão):
 
 | Mixin | Implementa |
 |---|---|
@@ -124,16 +124,19 @@ permite injetar lógica condicional (baseada no usuário logado, em parâmetros 
 class DetalheLivroView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = LivroSerializer
 
-    def get_queryset(self):
+    def get_queryset(self): # define o **QuerySet que a View irá utilizar para buscar seus objetos. Podemos sobrescrevê-lo para aplicar filtros, regras condicionais ou otimizações
         return Livro.objects.select_related("autor").prefetch_related("categorias")
 
-    def destroy(self, request, *args, **kwargs):
+    def destroy(self, request, *args, **kwargs): # Nas Generic Views, o método destroy() é responsável pelo comportamento do DELETE. Podemos sobrescrevê-lo para adicionar regras de negócio antes da exclusão:
+    
         livro = self.get_object()
         if livro.emprestimos.filter(data_devolucao_real__isnull=True).exists():
             return Response(
                 {"erro": "Não é possível remover um livro com empréstimos em aberto."},
                 status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
+        
+        #No caso acima, self.get_object() obtém o objeto que está sendo requisitado. O DRF utiliza o pk capturado pela URL para localizar esse objeto dentro do queryset. Verificamos se existem empréstimos em aberto. Se existir, interrompemos a exclusão. 
         return super().destroy(request, *args, **kwargs)
 ```
 
@@ -171,8 +174,7 @@ class LeitorViewSet(
     serializer_class = LeitorSerializer
 ```
 
-Existe ainda `ReadOnlyModelViewSet`, que só permite `list` e `retrieve` — útil para
-recursos consultáveis por qualquer um, mas gerenciáveis apenas pelo admin.
+Existe ainda `viewsets.ReadOnlyModelViewSet`, que só permite `list` e `retrieve` — útil para recursos consultáveis por qualquer um, mas gerenciáveis apenas pelo admin. Além disso, podemos ter o atributo http_method_names (exemplo: http_method_names = ["get", "delete"])
 
 ## 4.5 Routers: gerando as URLs automaticamente
 
@@ -190,7 +192,7 @@ router.register("autores", AutorViewSet, basename="autor")
 router.register("categorias", CategoriaViewSet, basename="categoria")
 
 urlpatterns = [
-    path("api/", include(router.urls)),
+    path("api/", include(router.urls)), # Nesse caso mais simples, também poderia ser urlpatterns = router.urls
 ]
 ```
 
@@ -235,17 +237,17 @@ urlpatterns = [
 ```
 
 Isso gera `/api/livros/{livro_pk}/avaliacoes/`. Dentro do ViewSet aninhado, você usa o
-parâmetro de URL para filtrar (e, ao criar, para associar automaticamente ao pai):
+parâmetro de URL para filtrar (e, ao criar, para associar automaticamente ao pai), uma observação é que caso não existisse isso, ao criar uma review, teriamos que passar o produto, o que não faz muito sentido, é melhor que isso seja pego de maneira automática:
 
 ```python
 class AvaliacaoViewSet(ModelViewSet):
     serializer_class = AvaliacaoSerializer
 
     def get_queryset(self):
-        return Avaliacao.objects.filter(livro_id=self.kwargs["livro_pk"])
+        return Avaliacao.objects.filter(livro_id=self.kwargs["livro_pk"]) # Esse self.kwargs vem da url que chamou o viewset
 
-    def get_serializer_context(self):
-        return {**super().get_serializer_context(), "livro_id": self.kwargs["livro_pk"]}
+    def get_serializer_context(self): # Método que serve para passar contexto adicional para o Serializer, caso necessárip
+        return {**super().get_serializer_context(), "livro_id": self.kwargs["livro_pk"]} #o super.get_serializer_context() é necessário para passar outros contextos, como da requisição, por exemplo
 ```
 
 ```python
@@ -260,7 +262,11 @@ class AvaliacaoSerializer(serializers.ModelSerializer):
         )
 ```
 
+
+
 ## 4.7 Filtros, busca e ordenação genéricos
+
+Suponhamos que na nossa url nos quisessemos filtrar um livro por sua categoria (?categoria_id=x). Uma forma de fazer isso é:
 
 ### Filtro básico manual (sem biblioteca)
 
@@ -366,7 +372,9 @@ GET /api/livros/?ordering=preco,titulo
 REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
-}
+} 
+
+# OBS: Fazendo essa configuração via settings.py, não precisamos ir em cada viewset e colocar o atributo pagination_class = PageNumberPagination. Ele aplica para todos. O unico problema é que aplica para todos os ViewSets. Se quiser algo mais especifico, talvez seja interessante a abordagem que trarei mais a frente
 ```
 
 Resposta paginada:
@@ -389,7 +397,7 @@ Existem outras estratégias, escolhidas conforme o caso de uso:
 | `CursorPagination` | cursor opaco, sem número de página | grandes volumes, dados que mudam com frequência (evita duplicar/pular itens entre páginas) |
 
 Uma classe de paginação customizada (útil para fixar `page_size` sem precisar de uma
-configuração global, ou para reaproveitar em um único ViewSet):
+configuração global no settings.py, ou para reaproveitar em um único ViewSet):
 
 ```python
 # catalogo/pagination.py
